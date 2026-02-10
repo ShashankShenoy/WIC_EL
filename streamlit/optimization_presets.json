@@ -1,0 +1,130 @@
+{
+  "presets": {
+    "eco_friendly": {
+      "name": "Eco-Friendly (Carbon Priority)",
+      "description": "Maximize environmental sustainability",
+      "weights": {
+        "carbon": 0.7,
+        "renewable": 0.2,
+        "cost": 0.1,
+        "load_balancing": 0.15
+      },
+      "nsga2": {
+        "population_size": 150,
+        "generations": 250,
+        "crossover_prob": 0.9,
+        "mutation_prob": 0.1,
+        "crossover_eta": 15,
+        "mutation_eta": 20
+      }
+    },
+    "cost_efficient": {
+      "name": "Cost-Efficient",
+      "description": "Minimize operational expenses",
+      "weights": {
+        "carbon": 0.2,
+        "renewable": 0.1,
+        "cost": 0.7,
+        "load_balancing": 0.1
+      },
+      "nsga2": {
+        "population_size": 100,
+        "generations": 200,
+        "crossover_prob": 0.85,
+        "mutation_prob": 0.12,
+        "crossover_eta": 20,
+        "mutation_eta": 25
+      }
+    },
+    "balanced": {
+      "name": "Balanced Approach",
+      "description": "Equal priority to all objectives",
+      "weights": {
+        "carbon": 0.33,
+        "renewable": 0.33,
+        "cost": 0.34,
+        "load_balancing": 0.15
+      },
+      "nsga2": {
+        "population_size": 120,
+        "generations": 200,
+        "crossover_prob": 0.9,
+        "mutation_prob": 0.1,
+        "crossover_eta": 15,
+        "mutation_eta": 20
+      }
+    },
+    "renewable_focus": {
+      "name": "Renewable Energy Focus",
+      "description": "Maximize solar and wind utilization",
+      "weights": {
+        "carbon": 0.25,
+        "renewable": 0.65,
+        "cost": 0.1,
+        "load_balancing": 0.12
+      },
+      "nsga2": {
+        "population_size": 150,
+        "generations": 250,
+        "crossover_prob": 0.92,
+        "mutation_prob": 0.08,
+        "crossover_eta": 12,
+        "mutation_eta": 18
+      }
+    },
+    "load_balanced": {
+      "name": "Load Balanced",
+      "description": "Distribute jobs evenly across regions",
+      "weights": {
+        "carbon": 0.3,
+        "renewable": 0.3,
+        "cost": 0.2,
+        "load_balancing": 0.3
+      },
+      "nsga2": {
+        "population_size": 100,
+        "generations": 180,
+        "crossover_prob": 0.88,
+        "mutation_prob": 0.11,
+        "crossover_eta": 18,
+        "mutation_eta": 22
+      }
+    },
+    "aggressive_optimization": {
+      "name": "Aggressive Optimization",
+      "description": "High exploration, longer optimization",
+      "weights": {
+        "carbon": 0.5,
+        "renewable": 0.3,
+        "cost": 0.2,
+        "load_balancing": 0.15
+      },
+      "nsga2": {
+        "population_size": 200,
+        "generations": 300,
+        "crossover_prob": 0.95,
+        "mutation_prob": 0.15,
+        "crossover_eta": 10,
+        "mutation_eta": 15
+      }
+    },
+    "quick_test": {
+      "name": "Quick Test",
+      "description": "Fast optimization for testing",
+      "weights": {
+        "carbon": 0.5,
+        "renewable": 0.3,
+        "cost": 0.2,
+        "load_balancing": 0.1
+      },
+      "nsga2": {
+        "population_size": 50,
+        "generations": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": 0.1,
+        "crossover_eta": 15,
+        "mutation_eta": 20
+      }
+    }
+  }
+}
