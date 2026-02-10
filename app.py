@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
+import warnings
 from datetime import timedelta
 from sklearn.preprocessing import MinMaxScaler
 from pymoo.core.problem import Problem
@@ -11,6 +12,9 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.operators.sampling.rnd import IntegerRandomSampling
 from pymoo.optimize import minimize
 import plotly.express as px
+
+# Suppress sklearn version warnings (models trained on 1.6.1, running on 1.7.0)
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
 
 # ---------------------------
 # Page config & header
@@ -26,6 +30,37 @@ st.markdown("""
 This app predicts future carbon intensity, solar/cloud cover, wind speed and temperature per region (using your trained `.pkl` models)
 and then schedules cloud jobs across predicted time slots using a multi-objective NSGA-II optimization.
 """)
+
+# ---------------------------
+# Cached functions for performance
+# ---------------------------
+@st.cache_data
+def load_and_process_data(uploaded_file):
+    """Load and preprocess historical data with caching"""
+    df = pd.read_csv(uploaded_file, parse_dates=['timestamp'])
+    
+    # Basic preprocessing and forward-fill
+    df = df.sort_values(['region', 'timestamp']).reset_index(drop=True)
+    df[['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']] = (
+        df.groupby('region')[['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']].ffill()
+    )
+    
+    # Feature engineering
+    df['hour'] = df['timestamp'].dt.hour
+    df['day_of_week'] = df['timestamp'].dt.dayofweek
+    df['month'] = df['timestamp'].dt.month
+    df['day_of_year'] = df['timestamp'].dt.dayofyear
+    
+    for col in ['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']:
+        df[f'{col}_lag1'] = df.groupby('region')[col].shift(1)
+    
+    df = df.dropna().reset_index(drop=True)
+    return df
+
+@st.cache_resource
+def load_models(uploaded_file):
+    """Load ML models with caching"""
+    return pickle.load(uploaded_file)
 
 # ---------------------------
 # Sidebar: Uploads & sliders
@@ -71,31 +106,15 @@ if run_button:
     else:
         try:
             with st.spinner("Loading dataset and model..."):
-                df_historical = pd.read_csv(uploaded_csv, parse_dates=['timestamp'])
+                # Use cached loading functions
+                df_historical = load_and_process_data(uploaded_csv)
                 ok, msg = validate_df(df_historical)
                 if not ok:
                     st.error(msg)
                     st.stop()
 
                 # Load models: expected structure: models[region][target] = estimator
-                models = pickle.load(uploaded_pkl)
-
-                # Basic preprocessing and forward-fill
-                df_historical = df_historical.sort_values(['region', 'timestamp']).reset_index(drop=True)
-                df_historical[['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']] = (
-                    df_historical.groupby('region')[['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']].ffill()
-                )
-
-                # Feature engineering
-                df_historical['hour'] = df_historical['timestamp'].dt.hour
-                df_historical['day_of_week'] = df_historical['timestamp'].dt.dayofweek
-                df_historical['month'] = df_historical['timestamp'].dt.month
-                df_historical['day_of_year'] = df_historical['timestamp'].dt.dayofyear
-
-                for col in ['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']:
-                    df_historical[f'{col}_lag1'] = df_historical.groupby('region')[col].shift(1)
-
-                df_historical = df_historical.dropna().reset_index(drop=True)
+                models = load_models(uploaded_pkl)
 
                 feature_cols = [
                     'hour', 'day_of_week', 'month', 'day_of_year',
@@ -109,7 +128,7 @@ if run_button:
             st.exception(f"Failed to load files: {e}")
             st.stop()
 
-        # Forecasting
+        # Forecasting - OPTIMIZED with vectorization
         with st.spinner("Generating future timestamps and forecasting..."):
             regions = df_historical['region'].unique()
             last_timestamp = df_historical['timestamp'].max()
@@ -118,37 +137,72 @@ if run_button:
                 periods=forecast_days * 288,  # 5min slots per day
                 freq='5min'
             )
+            
             future_data = []
-            for region in regions:
-                # If model doesn't have region, try to use nearest or raise
+            progress_bar = st.progress(0)
+            total_regions = len(regions)
+            
+            for idx, region in enumerate(regions):
+                # If model doesn't have region, skip
                 if region not in models:
                     st.warning(f"Region '{region}' not present in model file — skipping.")
                     continue
 
                 last_values = df_historical[df_historical['region'] == region].iloc[-1]
-
-                for ts in future_timestamps:
-                    features = {
+                
+                # Pre-allocate arrays for this region
+                n_timestamps = len(future_timestamps)
+                region_predictions = np.zeros((n_timestamps, len(target_cols)))
+                
+                # Create feature matrix for all timestamps at once
+                feature_matrix = pd.DataFrame({
+                    'hour': [ts.hour for ts in future_timestamps],
+                    'day_of_week': [ts.dayofweek for ts in future_timestamps],
+                    'month': [ts.month for ts in future_timestamps],
+                    'day_of_year': [ts.dayofyear for ts in future_timestamps],
+                    'carbon_intensity_lag1': float(last_values['carbon_intensity']),
+                    'solar_cloud_pct_lag1': float(last_values['solar_cloud_pct']),
+                    'wind_speed_lag1': float(last_values['wind_speed']),
+                    'temperature_lag1': float(last_values['temperature'])
+                })
+                
+                # Explicitly set lag columns to float to avoid FutureWarning
+                feature_matrix = feature_matrix.astype({
+                    'carbon_intensity_lag1': 'float64',
+                    'solar_cloud_pct_lag1': 'float64',
+                    'wind_speed_lag1': 'float64',
+                    'temperature_lag1': 'float64'
+                })
+                
+                # Predict iteratively but update lag features efficiently
+                for i in range(n_timestamps):
+                    for j, target in enumerate(target_cols):
+                        pred = models[region][target].predict(feature_matrix.iloc[[i]])[0]
+                        region_predictions[i, j] = pred
+                    
+                    # Update lag features for next iteration
+                    if i < n_timestamps - 1:
+                        feature_matrix.loc[i+1, 'carbon_intensity_lag1'] = region_predictions[i, 0]
+                        feature_matrix.loc[i+1, 'solar_cloud_pct_lag1'] = region_predictions[i, 1]
+                        feature_matrix.loc[i+1, 'wind_speed_lag1'] = region_predictions[i, 2]
+                        feature_matrix.loc[i+1, 'temperature_lag1'] = region_predictions[i, 3]
+                
+                # Build result records
+                for i, ts in enumerate(future_timestamps):
+                    future_data.append({
                         'timestamp': ts,
                         'region': region,
                         'hour': ts.hour,
                         'day_of_week': ts.dayofweek,
                         'month': ts.month,
                         'day_of_year': ts.dayofyear,
-                        'carbon_intensity_lag1': last_values['carbon_intensity'],
-                        'solar_cloud_pct_lag1': last_values['solar_cloud_pct'],
-                        'wind_speed_lag1': last_values['wind_speed'],
-                        'temperature_lag1': last_values['temperature']
-                    }
-
-                    # Predict each parameter using model for this region
-                    for target in target_cols:
-                        X_pred = pd.DataFrame([features])[feature_cols]
-                        prediction = models[region][target].predict(X_pred)[0]
-                        features[target] = float(prediction)
-
-                    future_data.append(features)
-                    last_values = pd.Series(features)
+                        'carbon_intensity': region_predictions[i, 0],
+                        'solar_cloud_pct': region_predictions[i, 1],
+                        'wind_speed': region_predictions[i, 2],
+                        'temperature': region_predictions[i, 3]
+                    })
+                
+                progress_bar.progress((idx + 1) / total_regions)
 
             if len(future_data) == 0:
                 st.error("No future data generated — check that your model contains the regions present in CSV.")
@@ -173,7 +227,7 @@ if run_button:
             max_jobs_per_region = N_JOBS // n_regions + (1 if N_JOBS % n_regions != 0 else 0)
         st.success("Normalization complete ✔")
 
-        # Define optimization problem
+        # Define optimization problem - OPTIMIZED with pre-computed arrays
         class CloudSchedulingProblem(Problem):
             def __init__(self, df, n_jobs, max_jobs_per_region, weight_carbon, weight_renewable, weight_load):
                 self.df = df.reset_index(drop=True)
@@ -182,6 +236,11 @@ if run_button:
                 self.weight_carbon = weight_carbon
                 self.weight_renewable = weight_renewable
                 self.weight_load = weight_load
+                
+                # Pre-compute arrays for fast access
+                self.carbon_array = df['carbon_norm'].values
+                self.renewable_array = df['renewable_norm'].values
+                self.region_array = df['region'].values
 
                 n_var = n_jobs
                 super().__init__(n_var=n_var, n_obj=2, n_constr=1, xl=0, xu=len(df)-1, type_var=int)
@@ -194,18 +253,17 @@ if run_button:
                     # Clip indices just in case
                     sol_int = np.clip(sol_int, 0, len(self.df)-1)
 
-                    carbon = np.array([self.df.loc[i, 'carbon_norm'] for i in sol_int])
-                    renewable = np.array([self.df.loc[i, 'renewable_norm'] for i in sol_int])
+                    # Use pre-computed arrays instead of DataFrame indexing
+                    carbon = self.carbon_array[sol_int]
+                    renewable = self.renewable_array[sol_int]
 
                     # Duplicate constraint
                     duplicates = len(sol_int) - len(np.unique(sol_int))
 
-                    # Region load penalty
-                    region_counts = self.df.loc[sol_int, 'region'].value_counts()
-                    load_penalty = 0
-                    for count in region_counts:
-                        if count > self.max_jobs_per_region:
-                            load_penalty += (count - self.max_jobs_per_region)
+                    # Region load penalty - optimized
+                    regions_selected = self.region_array[sol_int]
+                    unique_regions, counts = np.unique(regions_selected, return_counts=True)
+                    load_penalty = np.sum(np.maximum(0, counts - self.max_jobs_per_region))
 
                     obj_carbon = self.weight_carbon * carbon.mean() + self.weight_load * load_penalty
                     obj_renewable = -self.weight_renewable * renewable.mean()
