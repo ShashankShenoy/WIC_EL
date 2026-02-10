@@ -12,13 +12,10 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.operators.sampling.rnd import IntegerRandomSampling
 from pymoo.optimize import minimize
 import plotly.express as px
+import plotly.graph_objects as go
 
-# Suppress sklearn version warnings (models trained on 1.6.1, running on 1.7.0)
 warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
 
-# ---------------------------
-# Page config & header
-# ---------------------------
 st.set_page_config(
     page_title="Cloud Job Scheduler — Forecast & Optimize",
     layout="wide",
@@ -125,7 +122,8 @@ if run_button:
 
             st.success("Loaded data & model ✔")
         except Exception as e:
-            st.exception(f"Failed to load files: {e}")
+            st.error(f"Failed to load files: {e}")
+            st.exception(e)
             st.stop()
 
         # Forecasting - OPTIMIZED with vectorization
@@ -210,22 +208,41 @@ if run_button:
 
             df_future = pd.DataFrame(future_data)
             df_future = df_future.reset_index(drop=True)
-        st.success(f"Generated {len(df_future)} future slots ({df_future['timestamp'].min()} → {df_future['timestamp'].max()})")
+            
+            # Count regions and time slots
+            n_regions = len(df_future['region'].unique())
+            n_timeslots = len(future_timestamps)
+            
+        st.success(f"Generated **{len(df_future)} future slots** across **{n_regions} regions** × **{n_timeslots} time slots** ({df_future['timestamp'].min()} → {df_future['timestamp'].max()})")
 
-        # Normalization
-        with st.spinner("Normalizing predictions..."):
+        # Normalization with SOLAR INVERSION FIX
+        with st.spinner("Normalizing predictions and computing renewable availability..."):
             scaler = MinMaxScaler()
             scaler.fit(df_historical[['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']])
-            df_future[['carbon_norm', 'solar_norm', 'wind_norm', 'temp_norm']] = scaler.transform(
+            
+            # Normalize all features
+            df_future[['carbon_norm', 'cloud_norm', 'wind_norm', 'temp_norm']] = scaler.transform(
                 df_future[['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']]
             )
-            df_future['renewable_norm'] = (df_future['solar_norm'] + df_future['wind_norm']) / 2
+            
+            # ✅ FIX: Invert cloud cover to get solar availability
+            # High cloud % = low solar availability
+            # Low cloud % = high solar availability
+            df_future['solar_norm'] = 1.0 - df_future['cloud_norm']
+            
+            # Compute renewable energy availability (solar + wind)
+            df_future['renewable_norm'] = (df_future['solar_norm'] + df_future['wind_norm']) / 2.0
+            
+            # Also create actual solar availability column for display
+            df_future['solar_availability_pct'] = 100.0 - df_future['solar_cloud_pct']
+            
             df_future['slot_index'] = df_future.index
 
             region_counts = df_future.groupby('region')['slot_index'].count().to_dict()
             n_regions = len(region_counts)
             max_jobs_per_region = N_JOBS // n_regions + (1 if N_JOBS % n_regions != 0 else 0)
-        st.success("Normalization complete ✔")
+            
+        st.success("Normalization complete ✔ (Cloud cover inverted to solar availability)")
 
         # Define optimization problem - OPTIMIZED with pre-computed arrays
         class CloudSchedulingProblem(Problem):
@@ -265,7 +282,10 @@ if run_button:
                     unique_regions, counts = np.unique(regions_selected, return_counts=True)
                     load_penalty = np.sum(np.maximum(0, counts - self.max_jobs_per_region))
 
+                    # Objective 1: Minimize carbon (with load penalty)
                     obj_carbon = self.weight_carbon * carbon.mean() + self.weight_load * load_penalty
+                    
+                    # Objective 2: Maximize renewable (negative because we minimize)
                     obj_renewable = -self.weight_renewable * renewable.mean()
 
                     F.append([obj_carbon, obj_renewable])
@@ -306,21 +326,26 @@ if run_button:
             best_solution_int = np.clip(best_solution_int, 0, len(df_future)-1)
 
             scheduled_slots = df_future.loc[best_solution_int,
-                                ['timestamp', 'region', 'carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']].copy()
+                                ['timestamp', 'region', 'carbon_intensity', 'solar_cloud_pct', 
+                                 'solar_availability_pct', 'wind_speed', 'temperature']].copy()
             scheduled_slots['job_id'] = range(1, N_JOBS + 1)
             scheduled_slots = scheduled_slots.sort_values('timestamp').reset_index(drop=True)
 
             avg_carbon = scheduled_slots['carbon_intensity'].mean()
-            avg_solar = scheduled_slots['solar_cloud_pct'].mean()
+            avg_cloud = scheduled_slots['solar_cloud_pct'].mean()
+            avg_solar = scheduled_slots['solar_availability_pct'].mean()
             avg_wind = scheduled_slots['wind_speed'].mean()
+            avg_temp = scheduled_slots['temperature'].mean()
             region_distribution = scheduled_slots['region'].value_counts()
 
         # Show metrics and tables
         st.header("📋 Optimized Schedule Summary")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Avg Carbon Intensity", f"{avg_carbon:.2f} gCO₂/kWh")
-        col2.metric("Avg Solar Cloud Cover", f"{avg_solar:.1f} %")
+        col2.metric("Avg Solar Availability", f"{avg_solar:.1f}%", 
+                   help="Higher is better (inverted from cloud cover)")
         col3.metric("Avg Wind Speed", f"{avg_wind:.1f} m/s")
+        col4.metric("Avg Temperature", f"{avg_temp:.1f}°C")
 
         st.subheader("Regional Distribution")
         dist_df = region_distribution.reset_index()
@@ -328,21 +353,52 @@ if run_button:
         st.table(dist_df)
 
         st.subheader("Sample Scheduled Jobs (first 20)")
-        st.dataframe(scheduled_slots.head(20), use_container_width=True)
+        display_cols = ['job_id', 'timestamp', 'region', 'carbon_intensity', 
+                       'solar_availability_pct', 'wind_speed', 'temperature']
+        st.dataframe(scheduled_slots[display_cols].head(20), use_container_width=True)
 
         # Plots
-        st.subheader("Forecasted Carbon Intensity (all regions)")
-        fig = px.line(df_future, x='timestamp', y='carbon_intensity', color='region')
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Forecasted Metrics (all regions)")
+        
+        tab1, tab2, tab3, tab4 = st.tabs(["Carbon Intensity", "Solar Availability", "Wind Speed", "Temperature"])
+        
+        with tab1:
+            fig1 = px.line(df_future, x='timestamp', y='carbon_intensity', color='region',
+                          title="Carbon Intensity Forecast")
+            st.plotly_chart(fig1, use_container_width=True)
+        
+        with tab2:
+            fig2 = px.line(df_future, x='timestamp', y='solar_availability_pct', color='region',
+                          title="Solar Availability % Forecast (100% - cloud cover)")
+            st.plotly_chart(fig2, use_container_width=True)
+        
+        with tab3:
+            fig3 = px.line(df_future, x='timestamp', y='wind_speed', color='region',
+                          title="Wind Speed Forecast")
+            st.plotly_chart(fig3, use_container_width=True)
+        
+        with tab4:
+            fig4 = px.line(df_future, x='timestamp', y='temperature', color='region',
+                          title="Temperature Forecast")
+            st.plotly_chart(fig4, use_container_width=True)
 
         st.subheader("Scheduled Jobs on Timeline")
         # Mark scheduled slots on df_future timeline
         df_future_mark = df_future.copy()
         df_future_mark['scheduled'] = False
         df_future_mark.loc[best_solution_int, 'scheduled'] = True
-        fig2 = px.scatter(df_future_mark, x='timestamp', y='region', color='scheduled',
-                          title="Timeline (scheduled slots highlighted)")
-        st.plotly_chart(fig2, use_container_width=True)
+        
+        fig5 = px.scatter(df_future_mark, x='timestamp', y='region', color='scheduled',
+                          title="Timeline (scheduled slots highlighted)",
+                          color_discrete_map={True: 'red', False: 'lightblue'})
+        st.plotly_chart(fig5, use_container_width=True)
+
+        # Renewable vs Carbon scatter
+        st.subheader("Trade-off: Carbon vs Renewable Energy")
+        fig6 = px.scatter(scheduled_slots, x='carbon_intensity', y='solar_availability_pct',
+                         size='wind_speed', color='region', hover_data=['timestamp', 'job_id'],
+                         title="Carbon Intensity vs Solar Availability (bubble size = wind speed)")
+        st.plotly_chart(fig6, use_container_width=True)
 
         # Download schedule
         csv = scheduled_slots.to_csv(index=False).encode('utf-8')
@@ -351,8 +407,25 @@ if run_button:
         # Save to server file (optional)
         try:
             scheduled_slots.to_csv("cloud_schedule_future_optimal.csv", index=False)
-        except Exception:
-            # ignore write failures on restricted hosts
-            pass
+            st.info("✅ Schedule also saved to server as `cloud_schedule_future_optimal.csv`")
+        except Exception as e:
+            st.warning(f"Could not save to server: {e}")
 
-        st.success("Schedule ready — check the table and download as needed.")
+        st.success("✅ Schedule ready — check the table and download as needed.")
+        
+        # Show optimization details
+        with st.expander("🔍 Optimization Details"):
+            st.write(f"**Total candidate slots:** {len(df_future)}")
+            st.write(f"**Jobs scheduled:** {N_JOBS}")
+            st.write(f"**Regions:** {n_regions}")
+            st.write(f"**Max jobs per region:** {max_jobs_per_region}")
+            st.write(f"**Population size:** {pop_size}")
+            st.write(f"**Generations:** {n_gen}")
+            st.write(f"**Carbon weight:** {weight_carbon:.2f}")
+            st.write(f"**Renewable weight:** {weight_renewable:.2f}")
+            st.write(f"**Load balance weight:** {weight_load:.2f}")
+            
+            if hasattr(res, 'F') and res.F is not None:
+                st.write("**Objective values (Pareto front):**")
+                pareto_df = pd.DataFrame(res.F, columns=['Carbon Objective', 'Renewable Objective (negative)'])
+                st.dataframe(pareto_df.head(10))
