@@ -1,8 +1,8 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileText, X } from 'lucide-react'
-import { Button } from '@/components/ui/Button'
-import { cn } from '@/lib/utils'
+import { Button } from './ui/Button'
+import { cn } from '../lib/utils'
 
 interface FileUploadProps {
   onFilesSelected: (csvFile: File, pklFile: File) => void

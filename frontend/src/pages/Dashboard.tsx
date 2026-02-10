@@ -5,13 +5,13 @@ import {
   Play, Download, BarChart3, Leaf, MapPin, Target
 } from 'lucide-react'
 import Plot from 'react-plotly.js'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
-import { Button } from '@/components/ui/Button'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { MetricCard } from '@/components/MetricCard'
-import { FileUpload } from '@/components/FileUpload'
-import { api, OptimizationConfig } from '@/services/api'
-import { formatNumber, formatPercentage, downloadFile } from '@/lib/utils'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/Card'
+import { Button } from '../components/ui/Button'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/Tabs'
+import { MetricCard } from '../components/MetricCard'
+import { FileUpload } from '../components/FileUpload'
+import { api, OptimizationConfig } from '../services/api'
+import { formatNumber, formatPercentage, downloadFile } from '../lib/utils'
 
 export default function Dashboard() {
   const [sessionId, setSessionId] = useState<string | null>(null)
