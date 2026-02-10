@@ -26,6 +26,8 @@ st.title("🌍 Cloud Job Scheduler — Forecasting & NSGA-II Optimization")
 st.markdown("""
 This app predicts future carbon intensity, solar/cloud cover, wind speed and temperature per region (using your trained `.pkl` models)
 and then schedules cloud jobs across predicted time slots using a multi-objective NSGA-II optimization.
+
+**Note:** Cloud cover % is automatically inverted to solar availability (100% cloud = 0% solar available).
 """)
 
 # ---------------------------
@@ -129,6 +131,11 @@ if run_button:
         # Forecasting - OPTIMIZED with vectorization
         with st.spinner("Generating future timestamps and forecasting..."):
             regions = df_historical['region'].unique()
+            
+            if len(regions) == 0:
+                st.error("No regions found in the dataset.")
+                st.stop()
+                
             last_timestamp = df_historical['timestamp'].max()
             future_timestamps = pd.date_range(
                 start=last_timestamp + timedelta(minutes=5),
@@ -400,6 +407,135 @@ if run_button:
                          title="Carbon Intensity vs Solar Availability (bubble size = wind speed)")
         st.plotly_chart(fig6, use_container_width=True)
 
+        # ============================================================
+        # ANALYTICS SECTION
+        # ============================================================
+
+        st.markdown("---")
+        st.header("📊 Advanced Analytics Dashboard")
+
+        # ----------------------------------------------------------
+        # 1) 🥧 Regional Job Distribution Pie Chart
+        # ----------------------------------------------------------
+        st.subheader("🥧 Regional Job Distribution")
+        
+        region_job_counts = scheduled_slots['region'].value_counts().reset_index()
+        region_job_counts.columns = ['Region', 'Jobs Scheduled']
+        
+        fig_pie = px.pie(
+            region_job_counts, 
+            values='Jobs Scheduled', 
+            names='Region',
+            title='Job Distribution Across Regions',
+            hole=0.3,  # Donut chart style
+            color_discrete_sequence=px.colors.qualitative.Set3
+        )
+        fig_pie.update_traces(
+            textposition='inside', 
+            textinfo='percent+label',
+            hovertemplate='<b>%{label}</b><br>Jobs: %{value}<br>Percentage: %{percent}<extra></extra>'
+        )
+        fig_pie.update_layout(height=500)
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+        # ----------------------------------------------------------
+        # 2) 📊 Pareto Front Visualization
+        # ----------------------------------------------------------
+        st.subheader("📊 Pareto Front — Optimization Trade-off")
+        if hasattr(res, 'F') and res.F is not None and len(res.F) > 0:
+            pareto_df = pd.DataFrame(res.F, columns=['Carbon Objective', 'Renewable Objective'])
+            pareto_df['Renewable Objective'] = -pareto_df['Renewable Objective']  # Flip for display
+            pareto_df['Solution'] = ['Other'] * len(pareto_df)
+            pareto_df.loc[0, 'Solution'] = '★ Selected'
+
+            fig_pareto = px.scatter(
+                pareto_df, x='Carbon Objective', y='Renewable Objective',
+                color='Solution',
+                color_discrete_map={'★ Selected': '#FF4B4B', 'Other': '#636EFA'},
+                title='Pareto Front: Carbon vs Renewable Objectives',
+                size_max=14
+            )
+            fig_pareto.update_traces(
+                marker=dict(size=10),
+                selector=dict(name='Other')
+            )
+            fig_pareto.update_traces(
+                marker=dict(size=18, symbol='star', line=dict(width=2, color='white')),
+                selector=dict(name='★ Selected')
+            )
+            fig_pareto.update_layout(
+                xaxis_title='Carbon Objective (lower is greener)',
+                yaxis_title='Renewable Objective (higher is better)',
+                height=450
+            )
+            st.plotly_chart(fig_pareto, use_container_width=True)
+        else:
+            st.info("Pareto front data not available for this run.")
+
+        # ----------------------------------------------------------
+        # 3) 🔥 Correlation Heatmap
+        # ----------------------------------------------------------
+        st.subheader("🔥 Forecast Metrics Correlation Heatmap")
+        corr_cols = ['carbon_intensity', 'solar_cloud_pct', 'wind_speed', 'temperature']
+        corr_matrix = df_future[corr_cols].corr()
+        nice_labels = ['Carbon Intensity', 'Cloud Cover %', 'Wind Speed', 'Temperature']
+
+        fig_corr = px.imshow(
+            corr_matrix.values,
+            x=nice_labels, y=nice_labels,
+            color_continuous_scale='RdBu_r',
+            zmin=-1, zmax=1,
+            text_auto='.2f',
+            title='Correlation Matrix of Forecasted Metrics',
+            aspect='auto'
+        )
+        fig_corr.update_layout(height=450)
+        st.plotly_chart(fig_corr, use_container_width=True)
+
+        # ----------------------------------------------------------
+        # 4) 📦 Hourly Carbon Intensity Box Plot
+        # ----------------------------------------------------------
+        st.subheader("📦 Hourly Carbon Intensity Distribution")
+        df_future['hour_of_day'] = df_future['timestamp'].dt.hour
+        fig_box = px.box(
+            df_future, x='hour_of_day', y='carbon_intensity', color='region',
+            title='Carbon Intensity Spread by Hour of Day',
+            labels={'hour_of_day': 'Hour of Day', 'carbon_intensity': 'Carbon Intensity (gCO₂/kWh)'}
+        )
+        fig_box.update_layout(height=450, xaxis=dict(dtick=1))
+        st.plotly_chart(fig_box, use_container_width=True)
+
+        # ----------------------------------------------------------
+        # 6) 🏆 Carbon Savings KPI Cards
+        # ----------------------------------------------------------
+        st.subheader("🏆 Optimization Impact — Carbon Savings")
+        overall_avg_carbon = df_future['carbon_intensity'].mean()
+        worst_avg_carbon = df_future.groupby('region')['carbon_intensity'].mean().max()
+        sched_avg_carbon = scheduled_slots['carbon_intensity'].mean()
+
+        savings_vs_overall = ((overall_avg_carbon - sched_avg_carbon) / overall_avg_carbon * 100) if overall_avg_carbon > 0 else 0
+        savings_vs_worst = ((worst_avg_carbon - sched_avg_carbon) / worst_avg_carbon * 100) if worst_avg_carbon > 0 else 0
+
+        kcol1, kcol2, kcol3 = st.columns(3)
+        kcol1.metric(
+            "Scheduled Avg Carbon",
+            f"{sched_avg_carbon:.1f} gCO₂/kWh"
+        )
+        kcol2.metric(
+            "Savings vs Overall Avg",
+            f"{savings_vs_overall:+.1f}%",
+            delta=f"{overall_avg_carbon - sched_avg_carbon:.1f} gCO₂/kWh",
+            delta_color="inverse"
+        )
+        kcol3.metric(
+            "Savings vs Worst Region",
+            f"{savings_vs_worst:+.1f}%",
+            delta=f"{worst_avg_carbon - sched_avg_carbon:.1f} gCO₂/kWh",
+            delta_color="inverse"
+        )
+
+        st.markdown("---")
+
         # Download schedule
         csv = scheduled_slots.to_csv(index=False).encode('utf-8')
         st.download_button("💾 Download Optimized Schedule (CSV)", csv, "cloud_schedule_future_optimal.csv", "text/csv")
@@ -427,5 +563,5 @@ if run_button:
             
             if hasattr(res, 'F') and res.F is not None:
                 st.write("**Objective values (Pareto front):**")
-                pareto_df = pd.DataFrame(res.F, columns=['Carbon Objective', 'Renewable Objective (negative)'])
-                st.dataframe(pareto_df.head(10))
+                pareto_df_detail = pd.DataFrame(res.F, columns=['Carbon Objective', 'Renewable Objective (negative)'])
+                st.dataframe(pareto_df_detail.head(10))
